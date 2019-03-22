@@ -5,6 +5,7 @@ import time
 import velocity
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
 from picamera.array import PiRGBArray
+import p_mqtt
 import random #remove this after states testing is done
 #Global variables for the right and left speed of motor
 global rightspeed
@@ -12,9 +13,16 @@ rightspeed = 0
 global leftspeed
 leftspeed = 0
 #Global variable for camera object
+global camera
+camera = PiCamera()
 #Set resolution and framerate of camera
+camera.resolution = (640, 480)
+camera.framerate = 20
 #Images are read in as Numpy Arrays
+global capture
+capture = PiRGBArray(camera, size=(640,480))
 #A sleep was recommended here to let the camera "warm up"
+time.sleep(0.1)
 #Defining variables to hold proportional error in position,
 #change in error in position and sum of error in position
 global Position_errorP_v
@@ -30,11 +38,10 @@ Position_totalError_v = 0
 #Flag to check if the Duck is stopped
 #global stop
 #stop = False
-global image
 #Kp, KD, and KI values
 POSITIONP = 0.1
 POSITIONI = 0.0000
-POSITIOND = 0.1
+POSITIOND = 0.0005
 POSITIONF = 0
 
 global state
@@ -46,13 +53,6 @@ RIGHTTURN = 3
 LEFTTURN = 4
 STRAIGHT = 5
 
-RTURNRTICKS = 602
-RTURNLTICKS = 1279
-LTURNRTICKS = 1692
-LTURNLTICKS = 1222
-STRAIGHTTICKS = 1316
-
-
 #This function takes in a frame that has already been converted
 #into HSV and detects stop lines. If a stop line is found,
 #the stop flag is set which stops the Duck.
@@ -63,7 +63,7 @@ def detect_stop(mask1):
     edges = cv2.Canny(mask1, 50, 150, apertureSize=3)
     #Use Hough Transform to find all lines in an image. The line of interest
     #in this case is the stop line
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180,180, minLineLength= 100, maxLineGap=1)
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180,100, minLineLength= 10, maxLineGap=1)
     cv2.waitKey(20)
     global stop
     #For every line discovered by Hough Transform
@@ -78,7 +78,7 @@ def detect_stop(mask1):
 
                 #If the numerator of the slope is close enough to 0, the stop
                 #line was found so anticipate stop
-            	if abs((y2-y1)/(x2-x1)) < 0.01:
+            	if abs((y2-y1)/(x2-x1)) < 1:
                     global state
 		    state = STOP
                     #stop = True
@@ -87,7 +87,7 @@ def detect_stop(mask1):
 		    return
 #This function takes in the raw image from the camera and will
 #detect either the yellow or white road lines in the image
-def linetracking(raw):
+def linetracking(raw,client,DUCK1_FEED2):
     cv2.imshow('raw',raw)
     #Minimize the region of interest to just the lower half of image
     #because that is where the road lines are
@@ -111,6 +111,8 @@ def linetracking(raw):
     #Ignore all pixels that aren't white to obtain a picture of only
     #the road lines
     mask1 = cv2.inRange(hsv, lower, upper)
+    #p_mqtt.encode_string(mask1,DUCK1_FEED2,client)
+    
     #cv2.imshow("white mask", mask1)
 
     #Ignore all pixels that aren't yellow to obtain a picture of only
@@ -165,6 +167,64 @@ def linetracking(raw):
     cv2.waitKey(20)
     #if cv2.waitKey(20) & 0xFF == ord('q'):
         #break
+    print "before get"
+    
+    global render
+    global old_render
+    global old_slider
+    
+    if not p_mqtt.q.empty():
+        slider= p_mqtt.q.get()
+        print "Slider " + slider
+        print "if q is not empty"
+        
+        #raw
+        if slider == "start":
+            render = raw
+            old_slider = "0"
+        
+        elif slider == "0":
+            render = frame
+            old_slider = slider
+        #edges
+        elif slider == "1":
+            render = edges
+            old_slider = slider
+            
+        #masked image
+        elif slider == "2":
+            render = masked_img
+            old_slider = slider
+
+        #white mask
+        elif slider == "3":
+            render = mask1
+            old_slider = slider
+            
+        #yellow mask
+        elif slider == "4":
+            render = mask2
+            old_slider = slider
+            
+    else:
+        print "queue is empty"
+        print "Olde Slider" + str(old_slider)
+        if old_slider == "0":
+            render = frame;
+        if old_slider == "1":
+            render = edges;
+        if old_slider == "2":
+            render = masked_img;
+        if old_slider == "3":
+            render = mask1;
+        if old_slider == "4":
+            render = mask2;
+    
+    p_mqtt.encode_string(render,DUCK1_FEED2,client)
+    print "encoding"
+    
+    
+    
     return yellow,avg
 
 
@@ -196,22 +256,22 @@ def position_controller(target, actual):
 def right_turn():
     global rightspeed
     global leftspeed
-    leftspeed = 0.44
-    rightspeed = 0.3
+    leftspeed = 0.7
+    rightspeed = 0.5
 
 def left_turn():
     global rightspeed
     global leftspeed
-    leftspeed = 0.3
-    rightspeed = 0.42
+    leftspeed = 0.5
+    rightspeed = 0.7
 
 def go_straight():
     global rightspeed
     global leftspeed
-    leftspeed = 0.4
-    rightspeed = 0.4
+    leftspeed = 0.5
+    rightspeed = 0.5
 
-def position_p(q):
+def position_p(client,DUCK1_FEED1,DUCK1_FEED2):
     window_width = 480
     window_height = 360
     global camera
@@ -221,62 +281,51 @@ def position_p(q):
     while(1):
 
         if state == STOP:
-            go_straight()
             print "in state stop"
             #velocity.resetEncoders()
-            if(velocity.rightencoderticks >= 800):
+            if(velocity.rightencoderticks >= 1152):
                 print "Encoder's reached the value"
-	        leftspeed = 0
+		leftspeed = 0
                 rightspeed = 0
                 time.sleep(2)
 
-                velocity.resetEncoders()
-
-                #decision = random.randint(1,4)
-                decision = 4
+                decision = random.randint(1,4)
                 if decision == 1:
                     state = RIGHTTURN
-                    velocity.resetEncoders()
                 elif decision == 2:
                     state = LEFTTURN
-                    velocity.resetEncoders()
                 elif decision == 3:
                     state = STRAIGHT
-                    velocity.resetEncoders()
                 else:
                     state = POSITIONCONTROLLER
         elif state == RIGHTTURN:
             right_turn()
             print "in state rightturn"
-            if(velocity.rightencoderticks >= RTURNRTICKS or velocity.leftencoderticks >= RTURNLTICKS):
-                state = POSITIONCONTROLLER
-
 
         elif state == LEFTTURN:
             left_turn()
             print "in state leftturn"
-            if(velocity.rightencoderticks >= LTURNRTICKS or velocity.leftencoderticks >= LTURNLTICKS):
-                state = POSITIONCONTROLLER
 
         elif state == STRAIGHT:
             go_straight()
             print "in state straight"
-            if(velocity.rightencoderticks >= STRAIGHTTICKS or velocity.leftencoderticks >= STRAIGHTTICKS):
-                state = POSITIONCONTROLLER
 
         else:
             #for each frame that is taken from the camera
-            while True:
-               global image
-               image = q.get()
+            for frame in camera.capture_continuous(capture, format='bgr', use_video_port=True):
+               global capture
+               image = capture.array
                #resize the image to make processing more manageable
                raw = cv2.resize(image, (window_width, window_height))
                #Find either the yellow or white line and what the average position
                #of the Duck is
-               yellow,avg = linetracking(raw)
+
+               p_mqtt.encode_string(raw,DUCK1_FEED1,client)
+
+               yellow,avg = linetracking(raw,client,DUCK1_FEED2)
+               print "After lietracking call"
                #130 for yellow line, 450 for white
                #If tracking off the yellow line this is the target position to use
-               print "in state positioncontrol"
                if yellow:
                    threshold = 105
                #If tracking off the white line use this target position instead
@@ -319,3 +368,4 @@ def position_p(q):
                    #cm/s since the velocity controller only takes in speeds in this unit
                    leftspeed = ((leftspeed*0.004)-0.006)
                    rightspeed = ((rightspeed*0.004)-0.006)
+               capture.truncate(0)
